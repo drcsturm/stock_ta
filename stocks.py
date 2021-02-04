@@ -32,7 +32,7 @@ class WeekdayDateFormatter(Formatter):
 
 
 def search_stock_symbols(stock):
-    fn = 'stock_symbols.csv'
+    fn = 'symbols.csv'
     if not os.path.exists(fn):
         symbols = get_nasdaq_symbols()
         symbols.to_csv(fn, index='Symbol')
@@ -355,7 +355,7 @@ class StockAnalysis:
         return ax
 
 
-    def plot_data(self, show_plot: bool = False, save_plot: bool = True):
+    def plot_data(self, show_plot: bool = False, save_plot: bool = True, zoom: int = 0):
         # make Date a column in the DataFrame
         self.df.reset_index(inplace=True)
         # number of charts to create is determined by finding columns in the dataframe
@@ -475,6 +475,7 @@ class StockAnalysis:
             ax.grid(which='minor', linestyle=':')
             ax.xaxis.set_major_formatter(formatter)
         fig.autofmt_xdate()
+        plt.xticks(rotation=5)
 
         title = f'Stock {self.stock}'
         if self.stock_name is not None:
@@ -483,20 +484,31 @@ class StockAnalysis:
         fig.tight_layout()
         figManager = plt.get_current_fig_manager()
         figManager.window.state('zoomed') # maximize the window
-        # zoom in on the last six months of data
-        start_idx = 0
-        if self.df.index[-1] >= 200:
-            start_idx = 180
-        plt.xlim(self.df.index[-start_idx], self.df.index[-1]+2)
+
+        # zoom to the last number of days indicated by zoom integer parameter
+        if zoom > 0 and self.df.index[-1] > zoom:
+            start_idx = zoom
+            plt.xlim(self.df.index[-start_idx], self.df.index[-1]+2)
 
         if save_plot:
-            plt.savefig(f'img/{self.stock}.png')
+            min_date = self.df.Date.min().strftime("%Y%m%d")
+            max_date = self.df.Date.max().strftime("%Y%m%d")
+            plt.savefig(f'img/{self.stock} - {min_date} - {max_date}.png')
         if show_plot:
             plt.show()
         plt.close()
 
 
-def compare_stocks():
+    def make_figure(self):
+        self.fig, self.axs = plt.subplots(2, 1, sharex=True, gridspec_kw={'hspace': 0, 'height_ratios': [5, 2]})
+
+    def plot(self, ax):
+        self.df.reset_index(inplace=True)
+
+
+
+
+def compare_stocks(args):
     """
     compare all stocks in the list.
     each stock shows percent increase and decrease by day compared to the first
@@ -542,7 +554,7 @@ def compare_stocks():
     plt.close()
 
 
-if __name__ == "__main__":
+def test():
     args = cli_parameters()
     if args.compare:
         compare_stocks()
@@ -575,3 +587,22 @@ if __name__ == "__main__":
                 os.startfile(f'.')
             else:
                 os.startfile(os.path.join('img', f'{args.stock[0]}.png'))
+
+
+if __name__ == "__main__":
+    args = cli_parameters()
+    if args.compare:
+        compare_stocks(args)
+    else:
+        obj = StockAnalysis(args.stock[0], args.start, args.end, plot_type='candlestick')
+        # obj.make_figure()
+        # obj.axs[0].plot(obj.df.Close)
+        obj.Bollinger_Bands()
+        obj.MACD()
+        obj.RSI()
+        obj.plot_data(show_plot=args.show, save_plot=args.save, zoom=0)
+
+        # import indicators.trend as trend
+        # macd = trend.MACD(obj.df.Close)
+        # macd.plot(obj.axs[1])
+        # plt.show()
