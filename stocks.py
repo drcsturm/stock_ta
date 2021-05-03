@@ -86,10 +86,13 @@ def cli_parameters():
     parser.add_argument('--best', action='store_true', default=False, help='show BB, MACD, and RSI')
     parser.add_argument('--save', action='store_true', default=False, help='Save plot to disk')
     parser.add_argument('--show', action='store_true', default=False, help='Show interactive plot')
-    parser.add_argument("--start", help="Start date - format MM/DD/YYYY",
+    parser.add_argument('--weekly', action='store_true', default=False, help='Resample data into weekly charts')
+    parser.add_argument("--startdate", help="Start date - format MM/DD/YYYY",
         default=datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=547), type=valid_date)
-    parser.add_argument("--end", help="End date - format MM/DD/YYYY",
+    parser.add_argument("--enddate", help="End date - format MM/DD/YYYY",
         default=datetime.now().replace(hour=0, minute=0, second=0, microsecond=0), type=valid_date)
+    parser.add_argument('--daydelta', type=int, help='Days between start date and end date.')
+    parser.add_argument('--zoom', type=int, default=0, help='Zoom into the plot for the last number of days.')
     args = parser.parse_args()
     args.stock = sorted([i.upper() for i in args.stock])
     if not args.save:
@@ -97,14 +100,16 @@ def cli_parameters():
     # if len(args.stock) > 1:
     #     args.save = True
     #     args.show = False
-    if args.start > args.end:
-        parser.error(f'Start date "{args.start}" can not be greater than End Date "{args.end}"')
+    if args.startdate > args.enddate:
+        parser.error(f'Start date "{args.startdate}" can not be greater than End Date "{args.enddate}"')
+    if args.daydelta:
+        args.startdate = args.enddate - timedelta(days=args.daydelta)
     if args.best:
         args.bb = True
         args.macd = True
         args.rsi = True
     # log_message(parser.parse_args().__str__())
-    if len(sys.argv)==1:
+    if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
     return args
@@ -126,7 +131,8 @@ def remove_holidays_and_weekends(start, end, move_date_forward=True):
 
 class StockAnalysis:
     def __init__(self, stock: str, start: datetime, end: datetime,
-        sma: list=[200, 50, 5], close_col: str="Close", plot_type: str="line"):
+        sma: list=[200, 50, 5], close_col: str="Close", plot_type: str="line",
+        weekly: bool=False):
         """
         Gather data for the stock between the given dates.
         SMA: list of simple moving average days to plot
@@ -142,7 +148,9 @@ class StockAnalysis:
         self.close_col = close_col
         self.sma = sma
         self.plot_type = plot_type
-        self.df = self.get_data_frame(self.stock, self.start, self.end)
+        self.weekly = weekly
+        self.df = self.get_data_frame(self.stock, self.start,
+            self.end, weekly=self.weekly)
         self.set_day_color()
         self.simple_moving_average()
 
@@ -162,6 +170,7 @@ class StockAnalysis:
         print(f"Pulling stock data for {stock} from {start} to {end}")
         try:
             df = pd.DataFrame(data.DataReader(stock,'yahoo',start,end))
+            # df = pd.DataFrame(data.DataReader(stock,'stooq',start,end))
         except KeyError:
             print("Stock out of range")
             df = pd.DataFrame()
@@ -185,15 +194,20 @@ class StockAnalysis:
         return df
 
 
-    def get_data_frame(self, stock, start, end, get_most_recent_data: bool = True):
+    def get_data_frame(self, stock, start, end, get_most_recent_data: bool = True, weekly: bool = False):
         """
         :stock: text stock ticker
         :start: date to start stock data in format "MM-DD-YYYY" or python datetime
         :end: date to end stock data in format "MM-DD-YYYY" or python datetime
         # :get_most_recent_data: update stored data to have recent close data
         """
-        start_dt = remove_holidays_and_weekends(start, end, move_date_forward=True)
-        end_dt = remove_holidays_and_weekends(start, end, move_date_forward=False)
+        if '-usd' in stock.lower():
+            start_dt = start
+            end_dt = end
+        else:
+            # do not remove days when dealing with a currency like ETH-USD
+            start_dt = remove_holidays_and_weekends(start, end, move_date_forward=True)
+            end_dt = remove_holidays_and_weekends(start, end, move_date_forward=False)
         filename = f"data/{stock}.csv"
         if os.path.exists(filename):
             df = pd.read_csv(filename, parse_dates=['Date'])
@@ -212,6 +226,15 @@ class StockAnalysis:
         df.Date = pd.to_datetime(df.Date)
         df = df[(df.Date >= start_dt) & (df.Date <= end_dt)].copy()
         df.set_index('Date', inplace=True)
+        if weekly:
+            logic = {
+                'High'  : 'max',
+                'Low'   : 'min',
+                'Open'  : 'first',
+                'Close' : 'last',
+                'Volume': 'sum'}
+            offset = pd.offsets.timedelta(days=-3)
+            df = df.resample('W', loffset=offset).apply(logic)
         df['TOpen'] = df.Open.shift(-1) # tomorrow's open
         # df = df.asfreq('D')
         return df
@@ -519,7 +542,7 @@ def compare_stocks(args):
     df = pd.DataFrame()
     dfv = pd.DataFrame()
     for stock in args.stock:
-        obj = StockAnalysis(stock, args.start, args.end)
+        obj = StockAnalysis(stock, args.startdate, args.enddate)
         day0_close = obj.df[obj.close_col].iloc[0]
         obj.df[stock] = (obj.df[obj.close_col] / day0_close - 1) * 100
         df = pd.concat([df, obj.df[[stock]]], axis=1)
@@ -569,7 +592,7 @@ def test():
         # start_stock = True
         # args.stock = ['DOW']
         for stock in args.stock:
-            obj = StockAnalysis(stock, args.start, args.end, plot_type='candlestick')
+            obj = StockAnalysis(stock, args.startdate, args.enddate, plot_type='candlestick')
             if args.bb:
                 obj.Bollinger_Bands()
             if args.macd:
@@ -594,13 +617,14 @@ if __name__ == "__main__":
     if args.compare:
         compare_stocks(args)
     else:
-        obj = StockAnalysis(args.stock[0], args.start, args.end, plot_type='candlestick')
+        obj = StockAnalysis(args.stock[0], args.startdate,
+            args.enddate, plot_type='candlestick', weekly=args.weekly)
         # obj.make_figure()
         # obj.axs[0].plot(obj.df.Close)
         obj.Bollinger_Bands()
         obj.MACD()
         obj.RSI()
-        obj.plot_data(show_plot=args.show, save_plot=args.save, zoom=0)
+        obj.plot_data(show_plot=args.show, save_plot=args.save, zoom=args.zoom)
 
         # import indicators.trend as trend
         # macd = trend.MACD(obj.df.Close)
