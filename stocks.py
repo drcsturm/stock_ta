@@ -6,7 +6,9 @@ import pandas as pd
 from pandas_datareader import data, wb
 from pandas_datareader.nasdaq_trader import get_nasdaq_symbols
 from pandas.tseries.holiday import USFederalHolidayCalendar
+from pandas.tseries.frequencies import to_offset
 import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
 from datetime import datetime, timedelta
 import pytz
 import sys
@@ -91,6 +93,8 @@ def cli_parameters():
         default=datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=547), type=valid_date)
     parser.add_argument("--enddate", help="End date - format MM/DD/YYYY",
         default=datetime.now().replace(hour=0, minute=0, second=0, microsecond=0), type=valid_date)
+    parser.add_argument("--priceline", help="Insert a horizontal black line on plot at price (float)", type=float)
+    parser.add_argument("--dateline", help="Insert a vertical black line on plot - format MM/DD/YYYY", type=valid_date)
     parser.add_argument('--daydelta', type=int, help='Days between start date and end date.')
     parser.add_argument('--zoom', type=int, default=0, help='Zoom into the plot for the last number of days.')
     args = parser.parse_args()
@@ -131,8 +135,8 @@ def remove_holidays_and_weekends(start, end, move_date_forward=True):
 
 class StockAnalysis:
     def __init__(self, stock: str, start: datetime, end: datetime,
-        sma: list=[200, 50, 5], close_col: str="Close", plot_type: str="line",
-        weekly: bool=False):
+        sma: list=[200, 100, 50, 5], close_col: str="Close", plot_type: str="line",
+        weekly: bool=False, priceline: float=None, dateline: datetime=None):
         """
         Gather data for the stock between the given dates.
         SMA: list of simple moving average days to plot
@@ -147,12 +151,16 @@ class StockAnalysis:
         self.end = end
         self.close_col = close_col
         self.sma = sma
+        self.ema = sma + [20]
         self.plot_type = plot_type
         self.weekly = weekly
+        self.priceline = priceline
+        self.dateline = dateline
         self.df = self.get_data_frame(self.stock, self.start,
             self.end, weekly=self.weekly)
         self.set_day_color()
         self.simple_moving_average()
+        self.exponential_moving_average()
 
 
     def confirm_stock_symbol(self):
@@ -166,11 +174,11 @@ class StockAnalysis:
         return count
 
 
-    def store_stock(self, stock, start, end, filename):
+    def store_stock(self, stock: str, start: datetime, end: datetime, filename: str):
         print(f"Pulling stock data for {stock} from {start} to {end}")
         try:
-            df = pd.DataFrame(data.DataReader(stock,'yahoo',start,end))
-            # df = pd.DataFrame(data.DataReader(stock,'stooq',start,end))
+            # df = pd.DataFrame(data.DataReader(stock,'yahoo',start,end))
+            df = pd.DataFrame(data.DataReader(stock,'stooq',start,end))
         except KeyError:
             print("Stock out of range")
             df = pd.DataFrame()
@@ -194,7 +202,7 @@ class StockAnalysis:
         return df
 
 
-    def get_data_frame(self, stock, start, end, get_most_recent_data: bool = True, weekly: bool = False):
+    def get_data_frame(self, stock: str, start: datetime, end: datetime, get_most_recent_data: bool = True, weekly: bool = False):
         """
         :stock: text stock ticker
         :start: date to start stock data in format "MM-DD-YYYY" or python datetime
@@ -233,8 +241,9 @@ class StockAnalysis:
                 'Open'  : 'first',
                 'Close' : 'last',
                 'Volume': 'sum'}
-            offset = pd.offsets.timedelta(days=-3)
-            df = df.resample('W', loffset=offset).apply(logic)
+            # df = df.resample('W', loffset="-3D").apply(logic)
+            df = df.resample("W").apply(logic)
+            df.index = df.index + to_offset("-3D")
         df['TOpen'] = df.Open.shift(-1) # tomorrow's open
         # df = df.asfreq('D')
         return df
@@ -243,6 +252,11 @@ class StockAnalysis:
     def simple_moving_average(self):
         for sma in self.sma:
             self.df[f'{sma} mavg'] = self.df[self.close_col].rolling(window=sma, min_periods=sma).mean()
+
+
+    def exponential_moving_average(self):
+        for ema in self.ema:
+            self.df[f'{ema} ema'] = self.df[self.close_col].ewm(span=ema, adjust=False).mean()
 
 
     def set_day_color(self):
@@ -359,22 +373,56 @@ class StockAnalysis:
         self.cmf_buffer = buffer
 
 
+    def HA(self, ema: int=12):
+        """
+        Heikin-Ashi Smoothed Buy Sell
+        """
+        self.df["HA_Close"] = (self.df[self.close_col] + 
+            self.df.Open + self.df.Low + self.df.High) / 4
+        self.df["HA_Open"] = (self.df[self.close_col].shift() + 
+            self.df.Open.shift()) / 2
+        self.df.iloc[0, self.df.columns.get_loc("HA_Open")
+            ] = (self.df.iloc[0]['Open'] + 
+            self.df.iloc[0][self.close_col]
+            ) / 2 # set value for the first HA_Open row
+        self.df["HA_Low"] = self.df[["Low", "HA_Open", "HA_Close"]].min(axis=1)
+        self.df["HA_High"] = self.df[["High", "HA_Open", "HA_Close"]].max(axis=1)
+        self.df['HA_day_color'] = 'red'
+        self.df.loc[self.df["HA_Close"] >= self.df["HA_Open"], 'HA_day_color'] = 'green'
+        self.df.loc[self.df["HA_Close"] == self.df["HA_Open"], 'HA_day_color'] = 'gray'
+        self.df[f'HA {ema} ema'] = self.df["HA_Close"].ewm(span=ema, adjust=False).mean()
+        
+
+    def VolumeByPrice(self, start: datetime, end: datetime):
+        pass
+
     def plot_data_mpf(self):
         mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='inherit', ohlc='inherit', alpha=0.5) #style="charles"
         s  = mpf.make_mpf_style(base_mpl_style='seaborn', marketcolors=mc)
         mpf.plot(self.df, type='candlestick', mav=(1, 200), volume=True, style=s, figratio=(16,8), figscale=1, title=self.stock)
 
 
-    def candlestick_plot(self, ax=None, positive_color: str='g', negative_color: str='r'):
+    def candlestick_plot(self, open: str="Open",
+        close: str=None, low: str="Low", high: str="High",
+        day_color: str="day_color", ax=None, 
+        positive_color: str='g', negative_color: str='r'):
+        if close is None:
+            close = self.close_col
         width_bar = 0.8
         width_stick = 0.15
-        self.df['bar_top'] = self.df.Open
-        self.df.loc[self.df[self.close_col] >= self.df.Open, 'bar_top'] = self.df[self.close_col]
-        self.df['bar_bot'] = self.df.Open
-        self.df.loc[self.df[self.close_col] < self.df.Open, 'bar_bot'] = self.df[self.close_col]
-        ax.bar(x=self.df.index, height=self.df.bar_top - self.df.bar_bot, width=width_bar, bottom=self.df.bar_bot, color=self.df.day_color, edgecolor=self.df.day_color, alpha=0.5)
-        ax.bar(x=self.df.index, height=self.df.High - self.df.bar_top, width=width_stick, bottom=self.df.bar_top, color=self.df.day_color, edgecolor=self.df.day_color, alpha=0.5)
-        ax.bar(x=self.df.index, height=self.df.Low - self.df.bar_bot, width=width_stick, bottom=self.df.bar_bot, color=self.df.day_color, edgecolor=self.df.day_color, alpha=0.5)
+        self.df['bar_top'] = self.df[open]
+        self.df.loc[self.df[close] >= self.df[open], 'bar_top'] = self.df[close]
+        self.df['bar_bot'] = self.df[open]
+        self.df.loc[self.df[close] < self.df[open], 'bar_bot'] = self.df[close]
+        ax.bar(x=self.df.index, 
+            height=self.df.bar_top - self.df.bar_bot, 
+            width=width_bar,
+            bottom=self.df.bar_bot,
+            color=self.df[day_color],
+            edgecolor=self.df[day_color],
+            alpha=0.5)
+        ax.bar(x=self.df.index, height=self.df[high] - self.df.bar_top, width=width_stick, bottom=self.df.bar_top, color=self.df[day_color], edgecolor=self.df[day_color], alpha=0.5)
+        ax.bar(x=self.df.index, height=self.df[low] - self.df.bar_bot, width=width_stick, bottom=self.df.bar_bot, color=self.df[day_color], edgecolor=self.df[day_color], alpha=0.5)
         return ax
 
 
@@ -390,6 +438,13 @@ class StockAnalysis:
 
 
         self.df.plot(y=self.close_col, ax=axs[0])
+        # axs[0] = self.candlestick_plot(ax=axs[0],
+        #     open="HA_Open",
+        #     close="HA_Close",
+        #     low="HA_Low",
+        #     high="HA_High",
+        #     day_color="HA_day_color")
+        # self.df.plot(y=f'HA 12 ema', ax=axs[0], linestyle='-')
         if self.plot_type == 'candlestick':
             axs[0] = self.candlestick_plot(ax=axs[0])
         else:
@@ -397,6 +452,23 @@ class StockAnalysis:
         for sma in self.sma:
             if self.df[f'{sma} mavg'].count() > 0:
                 self.df.plot(y=f'{sma} mavg', ax=axs[0], linestyle='--')
+        for ema in self.ema:
+            if self.df[f'{ema} ema'].count() > 0:
+                self.df.plot(y=f'{ema} ema', ax=axs[0], linestyle=':')
+        if self.priceline:
+            axs[0].axhline(y=self.priceline, color='k', linestyle='-', alpha=0.5)
+        if self.dateline and self.dateline >= self.df.Date.min() and self.dateline <= self.df.Date.max():
+            date_index = self.df.index[self.df.Date >= self.dateline].tolist()[0]
+            axs[0].axvline(x=date_index, color='k', linestyle='-', alpha=0.5)
+            annotate_date_text = axs[0].annotate(self.dateline.strftime("%b/%d/%Y"),
+                xy=(date_index - 2, self.df.Close.min() * 1.05), 
+                xytext=(date_index -2, self.df.Close.min() * 1.05),
+                bbox=dict(boxstyle="round", fc="0.7")
+            )
+            annotate_date_text.set_alpha(.5)
+
+
+        # Plot the volume chart below the price chart
         axs_count += 1
         axs[axs_count].bar(x=self.df.index, height=self.df.Volume, width=1, color=self.df.day_color)
         # self.df.plot(y='Volume', kind='bar', ax=axs[axs_count])
@@ -490,6 +562,10 @@ class StockAnalysis:
 
         formatter = WeekdayDateFormatter(self.df.Date)
         for ax in axs:
+            # turn on tick marks for the right side of the graph
+            ax.tick_params(labelright=True, right=True)
+            ax.yaxis.set_minor_locator(AutoMinorLocator(4))
+            ax.yaxis.set_tick_params(which='minor', right='on')
             # Turn on the minor TICKS, which are required for the minor GRID
             ax.minorticks_on()
             # Customize the major grid
@@ -569,7 +645,7 @@ def compare_stocks(args):
         ax.legend(loc='center left')
         ax.xaxis.set_major_formatter(formatter)
     fig.autofmt_xdate()
-    fig.suptitle(f"Comparing {args.stock}")
+    fig.suptitle(f'''Comparing "{', '.join(args.stock)}"''')
     fig.tight_layout()
     figManager = plt.get_current_fig_manager()
     figManager.window.state('zoomed')
@@ -618,12 +694,18 @@ if __name__ == "__main__":
         compare_stocks(args)
     else:
         obj = StockAnalysis(args.stock[0], args.startdate,
-            args.enddate, plot_type='candlestick', weekly=args.weekly)
+            args.enddate,
+            plot_type='candlestick',
+            weekly=args.weekly,
+            priceline=args.priceline,
+            dateline=args.dateline)
         # obj.make_figure()
         # obj.axs[0].plot(obj.df.Close)
         obj.Bollinger_Bands()
         obj.MACD()
         obj.RSI()
+        # obj.HA()
+        # obj.CMF()
         obj.plot_data(show_plot=args.show, save_plot=args.save, zoom=args.zoom)
 
         # import indicators.trend as trend
